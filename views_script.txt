@@ -1,0 +1,122 @@
+-- -------------------------------------------------------------------------
+-- -- VIEWS ----------------------------------------------------------------
+-- -------------------------------------------------------------------------
+
+-- Top-sales of banned songs: three best-seller singles that were not played on radio in the previous month (up to 30 days before)
+
+CREATE OR REPLACE VIEW top_sales AS
+WITH
+banned AS (SELECT DISTINCT title_s, trackN, side, isvn 
+	FROM TRACKS 
+	WHERE (trackN, side, isvn) NOT IN (SELECT trackN, side, isvn FROM PLAYBACKS WHERE ((sysdate-playdatetime) < 31))),
+best_sellers AS (SELECT title_s, trackN, side, isvn, count('X') sales 
+	FROM TRACKS NATURAL JOIN DISCS NATURAL JOIN SALE_LINE 
+	WHERE discs.format = 'S' 
+	GROUP BY title_s, trackN, side, isvn 
+	ORDER BY sales DESC),
+top_sales AS (SELECT title_s, trackN, side, isvn FROM best_sellers INTERSECT SELECT title_s, trackN, side, isvn FROM banned)
+SELECT title_s, trackN, side, isvn, sales FROM top_sales JOIN best_sellers USING(title_s, trackN, side, isvn) WHERE ROWNUM <= 3;
+
+-- Top five week-peak: the five artists (either soloists or groups) that have been the most listened to (most played on radio) in the last seven days.
+
+CREATE OR REPLACE VIEW week_peak AS
+WITH top_artists AS (SELECT artist, count('X') nPlays
+	FROM PLAYBACKS NATURAL JOIN TRACKS NATURAL JOIN DISCS
+	WHERE (sysdate-playdatetime)<7
+	GROUP BY artist
+	ORDER BY nPlays DESC)
+SELECT artist, nPlays FROM top_artists WHERE ROWNUM <=5;
+
+-- SoundBoss: manager whose vinyls are the most listened to (for each month).
+
+CREATE OR REPLACE VIEW soundboss AS
+WITH
+sales_managers AS (SELECT mng_name, mng_surn1, 
+	to_char(playdatetime, 'MM-YYYY') month, 
+	count(*) nPlays 
+	FROM PLAYBACKS JOIN DISCS USING(isvn)
+	GROUP BY mng_name, mng_surn1, to_char(playdatetime, 'MM-YYYY') 
+	ORDER BY month ASC),
+top_months AS (SELECT mng_name, mng_surn1, month, nPlays, row_number() OVER (PARTITION BY month ORDER BY nPlays DESC) top 
+	FROM sales_managers)
+SELECT mng_name, mng_surn1, month, nPlays FROM top_months WHERE top=1;
+
+-- Wreck-hit: least listened to single(s) (for each month)
+
+CREATE OR REPLACE VIEW wreck_hit AS
+WITH
+top_singles AS (SELECT isvn, to_char(playdatetime, 'MM-YYYY') month, count('X') nPlays 
+	FROM SINGLES NATURAL JOIN PLAYBACKS 
+	GROUP BY isvn, to_char(playdatetime, 'MM-YYYY') 
+	ORDER BY month ASC),
+top_month AS (SELECT isvn, month, nPlays, row_number() OVER (PARTITION BY month ORDER BY nPlays ASC) top
+	FROM top_singles)
+SELECT isvn, month, nPlays FROM top_month WHERE top=1;
+
+-- -------------------------------------------------------------------------
+-- -- EXTERNAL DESIGNS ------------------------------------------------------
+-- -------------------------------------------------------------------------
+
+-- Client Usage
+
+CREATE OR REPLACE VIEW client_data AS
+SELECT e_mail, name, surn1, surn2, birthdate, phone, address FROM CLIENTS
+WHERE dni=(SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') FROM DUAL);
+
+CREATE OR REPLACE VIEW client_orders AS
+SELECT ISVN, e_mail, order_s, qtty, delivery 
+FROM SALE_LINE NATURAL JOIN CLIENTS
+WHERE dni=(SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') FROM DUAL);
+
+CREATE OR REPLACE VIEW recommendations AS
+WITH 
+orders AS (SELECT album, isvn, order_s, rel_date FROM DISCS NATURAL JOIN SALE_LINE NATURAL JOIN CLIENTS 
+		WHERE dni=(SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') FROM DUAL)
+		ORDER BY order_s, rel_date DESC),
+recs AS (SELECT album, artist, isvn, rel_date FROM DISCS
+		WHERE rel_date <= (CASE 
+					WHEN EXISTS (SELECT rel_date FROM orders WHERE ROWNUM=1) THEN
+						(SELECT rel_date FROM orders WHERE ROWNUM=1)
+					ELSE sysdate
+				END)		
+		AND isvn NOT IN (SELECT isvn FROM orders)
+		ORDER BY rel_date DESC)
+SELECT album, artist, isvn FROM recs WHERE ROWNUM<=5;
+
+-- CREATE ROLE client NOT IDENTIFIED;
+-- GRANT UPDATE, INSERT, SELECT ON client_data TO client;
+-- GRANT UPDATE, INSERT, SELECT ON client_orders TO client;
+-- GRANT SELECT ON recommendations TO client;
+
+-- Warehouse Usage
+
+ALTER TABLE SALE_LINE ADD worker NUMBER(8);
+
+CREATE OR REPLACE VIEW worker_orders AS
+SELECT * FROM SALE_LINE
+WHERE delivery IS NULL OR delivery > sysdate
+AND worker = (SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') FROM DUAL);
+
+CREATE OR REPLACE VIEW productivity AS
+SELECT to_char(order_s, 'DD-MM-YYYY') day, count('X') nOrders
+FROM SALE_LINE
+WHERE worker = (SELECT SYS_CONTEXT ('USERENV', 'SESSION_USER') FROM DUAL)
+AND (sysdate-order_s) <=  31
+GROUP BY to_char(order_s, 'DD-MM-YYYY');
+
+CREATE OR REPLACE VIEW employee_month AS
+WITH 
+orders AS (SELECT worker, to_char(order_s, 'MM-YYYY') month, 
+		count('X') nOrders
+		FROM SALE_LINE
+		GROUP BY worker, to_char(order_s, 'MM-YYYY')),
+top_months AS (SELECT worker, month, nOrders,
+		row_number() OVER (PARTITION BY month ORDER BY nOrders DESC) top
+		FROM orders
+		WHERE ((sysdate-to_date(month, 'MM-YorYYY'))<=365))
+SELECT worker, month, nOrders FROM top_months WHERE top=1;
+ 
+-- CREATE ROLE worker NOT IDENTIFIED;
+-- GRANT UPDATE, INSERT, SELECT ON worker_orders TO worker;
+-- GRANT SELECT ON productivity TO worker;
+-- GRANT SELECT ON employee_month TO worker;

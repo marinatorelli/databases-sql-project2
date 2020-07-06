@@ -1,0 +1,65 @@
+-- ------------------------------------------------------------------------
+-- -- TRIGGERS ------------------------------------------------------------
+-- ------------------------------------------------------------------------
+
+-- Format: control redundancy due to ‘format’ attribute (every single or album corresponds to a disc with the correspondent format, either ‘S’ or ‘L’).
+
+CREATE OR REPLACE TRIGGER control_format
+BEFORE INSERT OR UPDATE OF format ON DISCS
+FOR EACH ROW
+DECLARE 
+	bad_format EXCEPTION;
+BEGIN
+	IF (:NEW.format != 'S' OR :NEW.format != 'L') THEN RAISE bad_format;
+	END IF;
+EXCEPTION
+	WHEN bad_format THEN DBMS_OUTPUT.PUT_LINE('Wrong format on table Discs');
+END;
+/
+
+-- Golondrinajes: implement on delete set default set on the design
+
+CREATE OR REPLACE TRIGGER golondrinajes
+AFTER DELETE ON TRACKS
+FOR EACH ROW
+DECLARE
+	dfttrack NUMBER(2);
+	dftside VARCHAR2(1);
+	dftalb NUMBER(8);
+BEGIN
+	SELECT trackN, side, ISVN 
+	INTO dfttrack, dftside, dftalb
+	FROM TRACKS NATURAL JOIN DISCS WHERE title_s='Moments' AND artist='Golondrinajes';
+	UPDATE PLAYBACKS 
+	SET trackN = dfttrack, side=dftside, isvn=dftalb 
+	WHERE trackN= :OLD.trackN AND side= :OLD.side AND isvn = :OLD.isvn;
+END;
+/
+
+-- NO refund: prevent deletion of already delivered orders.
+
+CREATE OR REPLACE TRIGGER no_refund
+BEFORE DELETE ON SALE_LINE
+FOR EACH ROW
+DECLARE 
+	no_refunds EXCEPTION;
+BEGIN
+	IF (:OLD.delivery <= sysdate) THEN RAISE no_refunds;
+	END IF;
+EXCEPTION
+	WHEN no_refunds THEN DBMS_OUTPUT.PUT_LINE('Cannot delete a delivered order');
+END;
+/
+
+-- Empty-vinyl: remove a disc when it does not have songs on one of its sides.
+
+CREATE OR REPLACE TRIGGER empty_vinyl
+AFTER DELETE ON TRACKS
+FOR EACH ROW
+BEGIN
+	DELETE FROM DISCS 
+	WHERE isvn=:OLD.isvn
+	AND NOT EXISTS (SELECT * FROM TRACKS 
+			WHERE isvn=:OLD.isvn AND side=:OLD.side);
+END;
+/

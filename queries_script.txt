@@ -1,0 +1,72 @@
+-- ------------------------------------------------------------------------
+-- -- QUERIES -------------------------------------------------------------
+-- ------------------------------------------------------------------------
+
+-- Not by myself: soloists who do not interpret their songs
+
+WITH soloist AS (SELECT artists.name name FROM ARTISTS LEFT OUTER JOIN MEMBERS ON artists.name=members.group_name WHERE members.group_name IS NULL),
+playedartists AS (SELECT DISTINCT writer name FROM PLAYBACKS NATURAL JOIN TRACKS)
+SELECT name FROM soloist MINUS SELECT name FROM playedartists;
+
+-- Still standing: last date and time each group was played on the radio.
+
+WITH 
+dates AS (SELECT artist, 
+	playdatetime, 
+	row_number() OVER (PARTITION BY artist ORDER BY playdatetime DESC) num 
+	FROM PLAYBACKS JOIN DISCS USING(isvn))
+SELECT artist, TO_CHAR(playdatetime, 'DD-MM-YY HH:MM') last_date 
+FROM dates 
+WHERE num=1;
+
+-- Revival Channels: broadcaster that
+
+-- A) plays the oldest themes (highest average age of played songs)
+WITH
+broadcasters AS (SELECT station,
+-- We convert the dates to julian format and then to number to calculate the average 
+	to_date(round(avg(to_number(to_char(rel_date, 'J')))),'J') avg_date 
+	FROM PLAYBACKS JOIN DISCS USING (isvn) 
+	GROUP BY station
+	ORDER BY avg_date ASC)
+SELECT station, avg_date FROM broadcasters WHERE ROWNUM = 1;
+
+
+-- B) the one playing more often old themes (over 30 yo).
+WITH
+broadcasters AS (SELECT station, count('X') old_plays
+		FROM PLAYBACKS NATURAL JOIN DISCS
+		WHERE to_number(to_char(sysdate, 'YYYY'))-to_number(to_char(rel_date, 'YYYY'))>=30
+		GROUP BY station
+		ORDER BY old_plays DESC)
+SELECT station, old_plays FROM broadcasters WHERE ROWNUM = 1;
+
+-- Trending catchy: singles most listened to during yesterday
+
+SELECT album, count('x') nplays 
+FROM PLAYBACKS JOIN DISCS USING (ISVN) 
+WHERE playdatetime >= sysdate-1 AND playdatetime < sysdate
+AND format='S'
+GROUP BY album
+ORDER BY nplays DESC;
+
+
+-- Ruling stone: longest-lived group among those in the base
+
+WITH
+beginning AS (SELECT group_name, start_g, row_number() OVER (PARTITION BY group_name ORDER BY start_g ASC) num_beg FROM MEMBERS),
+ending AS (SELECT group_name,
+	-- If the member is still part of the group we take the current date to calculate the time the group has existed.
+	(CASE
+		WHEN end_g IS NOT NULL THEN end_g
+		ELSE sysdate
+END) end_g, 
+	row_number() OVER (PARTITION BY group_name ORDER BY end_g DESC) num_end 
+	FROM MEMBERS),
+top_time AS (SELECT group_name, (end_g-start_g) livetime
+FROM beginning JOIN ending USING (group_name)
+-- We take the lowest starting point from all the members that have taken part in the group and the highest ending point)
+WHERE num_beg=1 AND num_end=1
+ORDER BY livetime DESC)
+-- From the previous subquery we only take the top group
+SELECT group_name, livetime FROM top_time WHERE ROWNUM=1;
